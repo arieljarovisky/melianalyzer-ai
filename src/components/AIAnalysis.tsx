@@ -66,15 +66,29 @@ Por favor, estructura tu respuesta en formato Markdown con las siguientes seccio
 Usa un tono profesional, motivador y directo.
 `;
 
+      const model =
+        typeof process.env.GEMINI_MODEL === 'string' && process.env.GEMINI_MODEL
+          ? process.env.GEMINI_MODEL
+          : 'gemini-2.0-flash';
+
       const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
+        model,
         contents: prompt,
       });
 
       setAnalysis(response.text || 'No se pudo generar el análisis.');
     } catch (err: any) {
       console.error('Gemini API Error:', err);
-      setError('Ocurrió un error al generar el análisis con IA. Por favor, intenta nuevamente.');
+      const msg = String(err?.message || err || '');
+      if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota')) {
+        setError(
+          'Cuota de la API de Google agotada o modelo sin cupo en el plan gratuito. ' +
+            'En Vercel, define GEMINI_MODEL=gemini-2.0-flash (o gemini-2.5-flash) y redeploy. ' +
+            'Si sigue fallando, esperá unos minutos o revisá facturación en Google AI Studio.'
+        );
+      } else {
+        setError('Ocurrió un error al generar el análisis con IA. Por favor, intenta nuevamente.');
+      }
     } finally {
       setLoading(false);
     }
