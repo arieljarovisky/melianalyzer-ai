@@ -5,7 +5,14 @@ export function Login() {
     try {
       const response = await fetch('/api/auth/url');
       if (!response.ok) {
-        throw new Error('Failed to get auth URL');
+        let backendError = 'Failed to get auth URL';
+        try {
+          const data = await response.json();
+          backendError = data?.error || backendError;
+        } catch {
+          // Ignore JSON parsing errors and keep fallback message.
+        }
+        throw new Error(backendError);
       }
       const { url } = await response.json();
 
@@ -20,7 +27,8 @@ export function Login() {
       }
     } catch (error) {
       console.error('OAuth error:', error);
-      alert('Error connecting to Mercado Libre. Check if MELI_CLIENT_ID is set in secrets.');
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      alert(`Error connecting to Mercado Libre: ${message}`);
     }
   };
 

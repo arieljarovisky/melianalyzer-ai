@@ -4,6 +4,10 @@ import cookieParser from "cookie-parser";
 import axios from "axios";
 import jwt from "jsonwebtoken";
 import path from "path";
+import dotenv from "dotenv";
+
+dotenv.config({ path: ".env.local" });
+dotenv.config();
 
 const app = express();
 const PORT = 3000;
@@ -229,4 +233,9 @@ async function startServer() {
   });
 }
 
-startServer();
+// In Vercel, this file is executed as a serverless handler.
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
