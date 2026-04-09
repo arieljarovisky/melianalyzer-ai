@@ -1,0 +1,5 @@
+{
+  "name": "MeliAnalyzer AI",
+  "description": "Agente de inteligencia artificial integrado con la API de Mercado Libre que analiza el rendimiento de una cuenta de e-commerce como un experto en marketing digital.",
+  "requestFramePermissions": []
+}
