@@ -8,27 +8,37 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import dotenv from "dotenv";
 import { streamText, createGateway } from "ai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 type ProcessWithLoadEnv = NodeJS.Process & {
   loadEnvFile?: (path?: string | URL | Buffer) => void;
 };
 
 function loadEnvironment() {
+  const root = process.cwd();
+  const envFile = path.join(root, ".env");
+  const local = path.join(root, ".env.local");
   const p = process as ProcessWithLoadEnv;
   if (typeof p.loadEnvFile === "function") {
-    const root = process.cwd();
-    const local = path.join(root, ".env.local");
-    const envFile = path.join(root, ".env");
-    if (fs.existsSync(local)) {
-      p.loadEnvFile(local);
-    }
     if (fs.existsSync(envFile)) {
       p.loadEnvFile(envFile);
     }
+    if (fs.existsSync(local)) {
+      p.loadEnvFile(local);
+    }
   } else {
-    dotenv.config({ path: ".env.local" });
-    dotenv.config();
+    dotenv.config({ path: ".env" });
+    dotenv.config({ path: ".env.local", override: true });
   }
+}
+
+/** Vercel AI Gateway usa `proveedor/modelo` (ej. openai/gpt-4o). Si copiás `openai:gpt-4o`, lo normalizamos. */
+function normalizeGatewayModelId(raw: string): string {
+  const t = raw.trim();
+  if (!t) return "google/gemini-2.0-flash";
+  if (t.includes("/")) return t;
+  const m = /^([\w.-]+):(.+)$/.exec(t);
+  return m ? `${m[1]}/${m[2]}` : t;
 }
 
 loadEnvironment();
@@ -215,7 +225,9 @@ const requireAuth = (req: express.Request, res: express.Response, next: express.
   }
 };
 
-// Streaming resumen IA vía Vercel AI Gateway (modelo configurable, ej. google/gemini-2.0-flash o mistral/ministral-8b-latest)
+// Streaming resumen IA:
+// - Por defecto: Google Gemini directo (GEMINI_API_KEY de AI Studio — sin tarjeta en Vercel).
+// - Opcional: Vercel AI Gateway (AI_SUMMARY_BACKEND=gateway; suele exigir tarjeta en el equipo Vercel).
 app.post("/ai/summary", aiSummaryLimiter, requireAuth, async (req, res) => {
   const { jobId, text } = req.body ?? {};
   if (typeof text !== "string" || !text.trim()) {
@@ -230,18 +242,64 @@ app.post("/ai/summary", aiSummaryLimiter, requireAuth, async (req, res) => {
   res.setHeader("X-Accel-Buffering", "no");
   res.setHeader("X-AI-Job-Id", id);
 
-  const modelId = process.env.AI_GATEWAY_MODEL ?? "google/gemini-2.0-flash";
+  const fullPrompt = `Identificador de trabajo (solo trazabilidad): ${id}\n\n${text.trim()}`;
+  const geminiKey = process.env.GEMINI_API_KEY?.trim();
+  const backend = process.env.AI_SUMMARY_BACKEND?.toLowerCase();
+  const useGemini =
+    backend === "gemini" || (backend !== "gateway" && Boolean(geminiKey));
 
-  const gatewayProvider = createGateway(
-    process.env.AI_GATEWAY_API_KEY
-      ? { apiKey: process.env.AI_GATEWAY_API_KEY }
-      : {}
-  );
+  const flushChunk = () => {
+    if (typeof (res as express.Response & { flush?: () => void }).flush === "function") {
+      (res as express.Response & { flush: () => void }).flush();
+    }
+  };
 
   try {
+    if (useGemini) {
+      if (!geminiKey) {
+        res
+          .status(500)
+          .type("text/plain")
+          .send(
+            "Configurá GEMINI_API_KEY (Google AI Studio, https://aistudio.google.com/) o usá AI_SUMMARY_BACKEND=gateway con Vercel AI Gateway."
+          );
+        return;
+      }
+
+      if (typeof res.flushHeaders === "function") {
+        res.flushHeaders();
+      }
+
+      const genAI = new GoogleGenerativeAI(geminiKey);
+      const geminiModel = process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
+      const model = genAI.getGenerativeModel({ model: geminiModel });
+      const streamResult = await model.generateContentStream(fullPrompt);
+
+      let wrote = 0;
+      for await (const chunk of streamResult.stream) {
+        const t = chunk.text();
+        if (t) {
+          res.write(t);
+          wrote += 1;
+          flushChunk();
+        }
+      }
+      if (wrote === 0) {
+        res.write("No se generó texto. Revisá GEMINI_MODEL y cuotas en AI Studio.");
+      }
+      res.end();
+      return;
+    }
+
+    const gatewayKey = process.env.AI_GATEWAY_API_KEY?.trim();
+    const modelId = normalizeGatewayModelId(process.env.AI_GATEWAY_MODEL ?? "google/gemini-2.0-flash");
+    const gatewayProvider = createGateway(
+      gatewayKey ? { apiKey: gatewayKey } : {}
+    );
+
     const result = streamText({
       model: gatewayProvider(modelId),
-      prompt: `Identificador de trabajo (solo trazabilidad): ${id}\n\n${text.trim()}`,
+      prompt: fullPrompt,
     });
 
     if (typeof res.flushHeaders === "function") {
@@ -257,9 +315,7 @@ app.post("/ai/summary", aiSummaryLimiter, requireAuth, async (req, res) => {
         if (value) {
           res.write(value);
           wrote += 1;
-          if (typeof (res as express.Response & { flush?: () => void }).flush === "function") {
-            (res as express.Response & { flush: () => void }).flush();
-          }
+          flushChunk();
         }
       }
     } finally {
