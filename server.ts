@@ -3,6 +3,7 @@ import cookieParser from "cookie-parser";
 import axios from "axios";
 import jwt from "jsonwebtoken";
 import path from "path";
+import crypto from "node:crypto";
 import dotenv from "dotenv";
 
 dotenv.config({ path: ".env.local" });
@@ -11,16 +12,39 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
+const PKCE_COOKIE = "meli_pkce_verifier";
+const COOKIE_SECURE = process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
+
 app.use(express.json());
 app.use(cookieParser());
 
 const MELI_API_URL = "https://api.mercadolibre.com";
 
+function usePkceFlow() {
+  return process.env.MELI_USE_PKCE !== "false";
+}
+
+function generatePkcePair() {
+  const codeVerifier = crypto.randomBytes(32).toString("base64url");
+  const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
+  return { codeVerifier, codeChallenge };
+}
+
+function pkceCookieOptions(): express.CookieOptions {
+  return {
+    httpOnly: true,
+    secure: COOKIE_SECURE,
+    sameSite: "lax",
+    path: "/",
+    maxAge: 10 * 60 * 1000,
+  };
+}
+
 // Helper to get redirect URI
 function getRedirectUri(req: express.Request) {
   const appUrl = process.env.APP_URL;
   if (appUrl) {
-    return `${appUrl}/auth/callback`;
+    return `${appUrl.replace(/\/$/, "")}/auth/callback`;
   }
   const protocol = req.headers["x-forwarded-proto"] || req.protocol;
   return `${protocol}://${req.headers.host}/auth/callback`;
@@ -30,13 +54,19 @@ function getRedirectUri(req: express.Request) {
 app.get("/api/auth/url", (req, res) => {
   const redirectUri = getRedirectUri(req);
   const clientId = process.env.MELI_CLIENT_ID;
-  
+
   if (!clientId) {
     return res.status(500).json({ error: "MELI_CLIENT_ID is not configured" });
   }
 
-  const authUrl = `https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}`;
-  
+  let authUrl = `https://auth.mercadolibre.com.ar/authorization?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}`;
+
+  if (usePkceFlow()) {
+    const { codeVerifier, codeChallenge } = generatePkcePair();
+    res.cookie(PKCE_COOKIE, codeVerifier, pkceCookieOptions());
+    authUrl += `&code_challenge=${encodeURIComponent(codeChallenge)}&code_challenge_method=S256`;
+  }
+
   res.json({ url: authUrl });
 });
 
@@ -52,19 +82,33 @@ app.get(["/auth/callback", "/auth/callback/"], async (req, res) => {
     return res.status(400).send("No code provided");
   }
 
+  const clearPkce = () => res.clearCookie(PKCE_COOKIE, { path: "/", secure: COOKIE_SECURE, sameSite: "lax" });
+
   try {
-    const tokenResponse = await axios.post("https://api.mercadolibre.com/oauth/token", new URLSearchParams({
+    const body = new URLSearchParams({
       grant_type: "authorization_code",
       client_id: clientId!,
       client_secret: clientSecret!,
       code: code as string,
-      redirect_uri: redirectUri
-    }), {
+      redirect_uri: redirectUri,
+    });
+
+    if (usePkceFlow()) {
+      const codeVerifier = req.cookies[PKCE_COOKIE];
+      if (!codeVerifier) {
+        return res.status(400).send("PKCE session missing: open login from this site again.");
+      }
+      body.append("code_verifier", codeVerifier);
+    }
+
+    const tokenResponse = await axios.post("https://api.mercadolibre.com/oauth/token", body, {
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json"
-      }
+        Accept: "application/json",
+      },
     });
+
+    clearPkce();
 
     const { access_token, refresh_token, user_id, expires_in } = tokenResponse.data;
 
@@ -95,6 +139,7 @@ app.get(["/auth/callback", "/auth/callback/"], async (req, res) => {
       </html>
     `);
   } catch (error: any) {
+    clearPkce();
     console.error("OAuth Error:", error.response?.data || error.message);
     res.status(500).send("Authentication failed");
   }
