@@ -1,16 +1,50 @@
 import express from "express";
 import cookieParser from "cookie-parser";
+import rateLimit from "express-rate-limit";
 import axios from "axios";
 import jwt from "jsonwebtoken";
 import path from "path";
+import fs from "node:fs";
 import crypto from "node:crypto";
 import dotenv from "dotenv";
+import { streamText } from "ai";
 
-dotenv.config({ path: ".env.local" });
-dotenv.config();
+type ProcessWithLoadEnv = NodeJS.Process & {
+  loadEnvFile?: (path?: string | URL | Buffer) => void;
+};
+
+function loadEnvironment() {
+  const p = process as ProcessWithLoadEnv;
+  if (typeof p.loadEnvFile === "function") {
+    const root = process.cwd();
+    const local = path.join(root, ".env.local");
+    const envFile = path.join(root, ".env");
+    if (fs.existsSync(local)) {
+      p.loadEnvFile(local);
+    }
+    if (fs.existsSync(envFile)) {
+      p.loadEnvFile(envFile);
+    }
+  } else {
+    dotenv.config({ path: ".env.local" });
+    dotenv.config();
+  }
+}
+
+loadEnvironment();
 
 const app = express();
+app.set("trust proxy", 1);
+
 const PORT = 3000;
+
+const aiSummaryLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: "Demasiadas solicitudes de IA. Probá de nuevo en un minuto.",
+});
 
 const PKCE_COOKIE = "meli_pkce_verifier";
 const COOKIE_SECURE = process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
@@ -180,6 +214,59 @@ const requireAuth = (req: express.Request, res: express.Response, next: express.
     res.status(401).json({ error: "Invalid session" });
   }
 };
+
+// Streaming resumen IA vía Vercel AI Gateway (modelo configurable, ej. google/gemini-2.0-flash o mistral/ministral-8b-latest)
+app.post("/ai/summary", aiSummaryLimiter, requireAuth, async (req, res) => {
+  const { jobId, text } = req.body ?? {};
+  if (typeof text !== "string" || !text.trim()) {
+    res.status(400).type("text/plain").send("Falta o es inválido el campo text");
+    return;
+  }
+
+  const id = jobId != null && jobId !== "" ? String(jobId) : "anonymous";
+
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Transfer-Encoding", "chunked");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("X-AI-Job-Id", id);
+
+  const modelId = process.env.AI_GATEWAY_MODEL ?? "google/gemini-2.0-flash";
+
+  try {
+    const result = streamText({
+      model: modelId,
+      prompt: `Identificador de trabajo (solo trazabilidad): ${id}\n\n${text.trim()}`,
+    });
+
+    const reader = result.textStream.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          res.write(value);
+          if (typeof (res as express.Response & { flush?: () => void }).flush === "function") {
+            (res as express.Response & { flush: () => void }).flush();
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    res.end();
+  } catch (err: unknown) {
+    console.error("AI summary stream error:", err);
+    if (!res.headersSent) {
+      res.status(500).type("text/plain").send(String(err instanceof Error ? err.message : err));
+    } else {
+      try {
+        res.end();
+      } catch {
+        /* noop */
+      }
+    }
+  }
+});
 
 // API to check auth status
 app.get("/api/auth/status", (req, res) => {
