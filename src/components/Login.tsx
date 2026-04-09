@@ -3,7 +3,7 @@ import { ShoppingBag, TrendingUp, Zap } from 'lucide-react';
 export function Login() {
   const handleConnect = async () => {
     try {
-      const response = await fetch('/api/auth/url');
+      const response = await fetch('/api/auth/url', { credentials: 'include' });
       if (!response.ok) {
         let backendError = 'Failed to get auth URL';
         try {

@@ -40,14 +40,34 @@ function pkceCookieOptions(): express.CookieOptions {
   };
 }
 
-// Helper to get redirect URI
+function requestOrigin(req: express.Request) {
+  const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https")
+    .split(",")[0]
+    .trim();
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "")
+    .split(",")[0]
+    .trim();
+  return { proto, host, callbackUrl: `${proto}://${host}/auth/callback` };
+}
+
+// OAuth redirect_uri must match the host where the PKCE cookie was set (same browser origin).
+// If APP_URL is a different host (e.g. production URL while testing on a Vercel preview), use this request's host.
 function getRedirectUri(req: express.Request) {
-  const appUrl = process.env.APP_URL;
-  if (appUrl) {
-    return `${appUrl.replace(/\/$/, "")}/auth/callback`;
+  const { host, callbackUrl } = requestOrigin(req);
+  const raw = process.env.APP_URL?.trim().replace(/\/$/, "");
+  if (!raw) {
+    return callbackUrl;
   }
-  const protocol = req.headers["x-forwarded-proto"] || req.protocol;
-  return `${protocol}://${req.headers.host}/auth/callback`;
+  try {
+    const normalized = raw.startsWith("http") ? raw : `https://${raw}`;
+    const app = new URL(normalized);
+    if (app.host === host) {
+      return `${app.origin}/auth/callback`;
+    }
+  } catch {
+    // ignore invalid APP_URL
+  }
+  return callbackUrl;
 }
 
 // 1. Auth URL Endpoint
