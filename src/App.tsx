@@ -14,8 +14,7 @@ export default function App() {
     checkAuth();
 
     const handleMessage = (event: MessageEvent) => {
-      const origin = event.origin;
-      if (!origin.endsWith('.run.app') && !origin.includes('localhost')) {
+      if (event.origin !== window.location.origin) {
         return;
       }
       if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
@@ -28,7 +27,7 @@ export default function App() {
 
   const checkAuth = async () => {
     try {
-      const res = await fetch('/api/auth/status');
+      const res = await fetch('/api/auth/status', { credentials: 'include' });
       const data = await res.json();
       setIsAuthenticated(data.authenticated);
     } catch (err) {
@@ -37,7 +36,7 @@ export default function App() {
   };
 
   const handleLogout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST' });
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
     setIsAuthenticated(false);
   };
 

@@ -264,10 +264,11 @@ app.get("/api/meli/orders", requireAuth, async (req, res) => {
 app.get("/api/meli/visits", requireAuth, async (req, res) => {
   try {
     const { access_token, user_id } = (req as any).meli;
-    const dateTo = new Date().toISOString().split('T')[0];
-    const dateFrom = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    
-    const response = await axios.get(`${MELI_API_URL}/users/${user_id}/items_visits?date_from=${dateFrom}T00:00:00.000-00:00&date_to=${dateTo}T00:00:00.000-00:00`, {
+    const dateTo = new Date().toISOString().split("T")[0];
+    const dateFrom = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+
+    const response = await axios.get(`${MELI_API_URL}/users/${user_id}/items_visits`, {
+      params: { date_from: dateFrom, date_to: dateTo },
       headers: { Authorization: `Bearer ${access_token}` }
     });
     res.json(response.data);
