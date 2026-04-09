@@ -7,7 +7,7 @@ import path from "path";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import dotenv from "dotenv";
-import { streamText } from "ai";
+import { streamText, createGateway } from "ai";
 
 type ProcessWithLoadEnv = NodeJS.Process & {
   loadEnvFile?: (path?: string | URL | Buffer) => void;
@@ -232,12 +232,23 @@ app.post("/ai/summary", aiSummaryLimiter, requireAuth, async (req, res) => {
 
   const modelId = process.env.AI_GATEWAY_MODEL ?? "google/gemini-2.0-flash";
 
+  const gatewayProvider = createGateway(
+    process.env.AI_GATEWAY_API_KEY
+      ? { apiKey: process.env.AI_GATEWAY_API_KEY }
+      : {}
+  );
+
   try {
     const result = streamText({
-      model: modelId,
+      model: gatewayProvider(modelId),
       prompt: `Identificador de trabajo (solo trazabilidad): ${id}\n\n${text.trim()}`,
     });
 
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    }
+
+    let wrote = 0;
     const reader = result.textStream.getReader();
     try {
       while (true) {
@@ -245,6 +256,7 @@ app.post("/ai/summary", aiSummaryLimiter, requireAuth, async (req, res) => {
         if (done) break;
         if (value) {
           res.write(value);
+          wrote += 1;
           if (typeof (res as express.Response & { flush?: () => void }).flush === "function") {
             (res as express.Response & { flush: () => void }).flush();
           }
@@ -253,6 +265,18 @@ app.post("/ai/summary", aiSummaryLimiter, requireAuth, async (req, res) => {
     } finally {
       reader.releaseLock();
     }
+
+    if (wrote === 0) {
+      try {
+        const full = await result.text;
+        if (full) {
+          res.write(full);
+        }
+      } catch {
+        /* stream ya consumido o sin texto */
+      }
+    }
+
     res.end();
   } catch (err: unknown) {
     console.error("AI summary stream error:", err);
